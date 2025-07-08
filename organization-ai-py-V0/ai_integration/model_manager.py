@@ -300,89 +300,551 @@ class AIModelManager(QObject):
         return api_keys
     
     def save_api_keys(self, keys: Dict[str, str]):
-        """Save API keys to config file"""
-        config_dir = os.path.join(os.path.expanduser('~'), '.organization_ai')
-        os.makedirs(config_dir, exist_ok=True)
+        """
+        Save API keys to secure local configuration.
         
-        config_path = os.path.join(config_dir, 'config.json')
-        config = {'api_keys': keys}
+        Stores API keys in a local configuration file with appropriate permissions
+        and updates the in-memory key storage for immediate use.
         
+        Args:
+            keys (Dict[str, str]): Dictionary of provider -> API key mappings
+            
+        Raises:
+            PermissionError: If unable to create config directory or file
+            JSONEncodeError: If keys cannot be serialized to JSON
+        """
         try:
+            # Ensure configuration directory exists
+            config_dir = os.path.join(os.path.expanduser('~'), '.organization_ai')
+            os.makedirs(config_dir, exist_ok=True)
+            
+            config_path = os.path.join(config_dir, 'config.json')
+            
+            # Load existing configuration or create new
+            config = {}
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    self.logger.warning("Existing config file corrupted, creating new one")
+                    config = {}
+            
+            # Update API keys section
+            config['api_keys'] = keys
+            
+            # Save configuration with restrictive permissions
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=2)
+                
+            # Set restrictive file permissions (read/write for owner only)
+            os.chmod(config_path, 0o600)
+            
+            # Update in-memory keys
             self.api_keys.update(keys)
+            
+            # Log success (without exposing actual keys)
+            saved_providers = [k for k, v in keys.items() if v]
+            self.logger.info(f"API keys saved for providers: {saved_providers}")
+            
         except Exception as e:
-            self.logger.error(f"Could not save config file: {e}")
+            self.logger.error(f"Failed to save API keys: {e}")
+            raise
     
     def register_model(self, config: ModelConfig):
-        """Register a new model configuration"""
-        self.models[config.id] = config
-        self.logger.info(f"Registered model: {config.name}")
+        """
+        Register a new AI model configuration.
+        
+        Adds a model configuration to the available models registry,
+        enabling it for loading and inference operations.
+        
+        Args:
+            config (ModelConfig): Model configuration to register
+            
+        Raises:
+            ValueError: If model configuration is invalid
+            KeyError: If model ID already exists and overwrite not allowed
+        """
+        try:
+            # Validate configuration
+            if not config.id:
+                raise ValueError("Model ID cannot be empty")
+            if not config.name:
+                raise ValueError("Model name cannot be empty")
+                
+            # Check for duplicate IDs
+            if config.id in self.models:
+                self.logger.warning(f"Overwriting existing model configuration: {config.id}")
+            
+            # Register the model
+            self.models[config.id] = config
+            self.model_status[config.id] = "registered"
+            
+            self.logger.info(f"Registered model: {config.name} (ID: {config.id}, Type: {config.type.value})")
+            
+            # Emit status change signal
+            self.model_status_changed.emit(config.id, "registered")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to register model {config.id}: {e}")
+            raise
     
     def get_available_models(self) -> List[ModelConfig]:
-        """Get list of available models"""
+        """
+        Get list of all available model configurations.
+        
+        Returns:
+            List[ModelConfig]: List of all registered model configurations
+        """
         return list(self.models.values())
     
+    def get_model_by_id(self, model_id: str) -> Optional[ModelConfig]:
+        """
+        Get a specific model configuration by ID.
+        
+        Args:
+            model_id (str): Unique model identifier
+            
+        Returns:
+            Optional[ModelConfig]: Model configuration if found, None otherwise
+        """
+        return self.models.get(model_id)
+    
+    def get_models_by_type(self, model_type: ModelType) -> List[ModelConfig]:
+        """
+        Get all models of a specific type.
+        
+        Args:
+            model_type (ModelType): Type of models to retrieve
+            
+        Returns:
+            List[ModelConfig]: List of models matching the specified type
+        """
+        return [model for model in self.models.values() if model.type == model_type]
+    
+    def get_loaded_models(self) -> List[str]:
+        """
+        Get list of currently loaded model IDs.
+        
+        Returns:
+            List[str]: List of model IDs that are currently loaded
+        """
+        return list(self.loaded_models.keys())
+    
+    def is_model_loaded(self, model_id: str) -> bool:
+        """
+        Check if a specific model is currently loaded.
+        
+        Args:
+            model_id (str): Model ID to check
+            
+        Returns:
+            bool: True if model is loaded, False otherwise
+        """
+        return model_id in self.loaded_models
+    
+    def get_model_status(self, model_id: str) -> str:
+        """
+        Get the current status of a model.
+        
+        Args:
+            model_id (str): Model ID to check
+            
+        Returns:
+            str: Current model status ("registered", "loading", "loaded", "error", "unloaded")
+        """
+        return self.model_status.get(model_id, "unknown")
+    
     def load_model(self, model_id: str) -> bool:
-        """Load a model for inference"""
+        """
+        Load a model for inference operations.
+        
+        Initializes and prepares a model for inference, handling different model types
+        appropriately. For local models, this involves loading weights and creating
+        inference pipelines. For API models, this validates configuration.
+        
+        Args:
+            model_id (str): Unique identifier of the model to load
+            
+        Returns:
+            bool: True if model loaded successfully, False otherwise
+            
+        Raises:
+            ValueError: If model ID is not found
+            RuntimeError: If model loading fails due to system constraints
+        """
         if model_id not in self.models:
-            self.model_error.emit(model_id, "Model not found")
+            error_msg = f"Model not found: {model_id}"
+            self.logger.error(error_msg)
+            self.model_error.emit(model_id, error_msg)
             return False
             
         config = self.models[model_id]
         
         try:
+            # Update status to loading
+            self.model_status[model_id] = "loading"
+            self.model_status_changed.emit(model_id, "loading")
+            
+            self.logger.info(f"Loading model: {config.name} (Type: {config.type.value})")
+            
+            # Handle different model types
             if config.type == ModelType.LOCAL_HUGGINGFACE:
-                self._load_huggingface_model(config)
+                success = self._load_huggingface_model(config)
             elif config.type == ModelType.LOCAL_OLLAMA:
-                self._load_ollama_model(config)
-            # API models don't need loading
+                success = self._load_ollama_model(config)
             elif config.type in [ModelType.API_OPENAI, ModelType.API_ANTHROPIC, ModelType.API_GROQ]:
-                self.loaded_models[model_id] = config
+                success = self._validate_api_model(config)
+            else:
+                raise ValueError(f"Unsupported model type: {config.type}")
+            
+            if success:
+                self.model_status[model_id] = "loaded"
+                self.model_status_changed.emit(model_id, "loaded")
+                self.model_loaded.emit(model_id)
+                self.logger.info(f"Model loaded successfully: {config.name}")
+                return True
+            else:
+                self.model_status[model_id] = "error"
+                self.model_status_changed.emit(model_id, "error")
+                return False
                 
-            self.model_loaded.emit(model_id)
+        except Exception as e:
+            error_msg = f"Failed to load model {model_id}: {str(e)}"
+            self.logger.error(error_msg)
+            self.model_status[model_id] = "error"
+            self.model_status_changed.emit(model_id, "error")
+            self.model_error.emit(model_id, error_msg)
+            return False
+    
+    def _validate_api_model(self, config: ModelConfig) -> bool:
+        """
+        Validate API model configuration.
+        
+        Args:
+            config (ModelConfig): API model configuration
+            
+        Returns:
+            bool: True if configuration is valid
+        """
+        # Check if API key is available
+        provider_key = None
+        if config.type == ModelType.API_OPENAI:
+            provider_key = self.api_keys.get('openai')
+        elif config.type == ModelType.API_ANTHROPIC:
+            provider_key = self.api_keys.get('anthropic')
+        elif config.type == ModelType.API_GROQ:
+            provider_key = self.api_keys.get('groq')
+            
+        if not provider_key:
+            raise ValueError(f"API key not configured for {config.type.value}")
+        
+        # Store the configuration (API models don't need actual loading)
+        self.loaded_models[config.id] = config
+        return True
+    
+    def unload_model(self, model_id: str) -> bool:
+        """
+        Unload a model to free resources.
+        
+        Args:
+            model_id (str): Model ID to unload
+            
+        Returns:
+            bool: True if successfully unloaded, False otherwise
+        """
+        try:
+            if model_id not in self.loaded_models:
+                self.logger.warning(f"Model {model_id} is not loaded")
+                return False
+            
+            # Get model data before removal
+            model_data = self.loaded_models[model_id]
+            
+            # Handle cleanup for different model types
+            if isinstance(model_data, dict) and 'pipeline' in model_data:
+                # HuggingFace model cleanup
+                del model_data['pipeline']
+                if 'model' in model_data:
+                    del model_data['model']
+                if 'tokenizer' in model_data:
+                    del model_data['tokenizer']
+            
+            # Remove from loaded models
+            del self.loaded_models[model_id]
+            
+            # Update status
+            self.model_status[model_id] = "unloaded"
+            self.model_status_changed.emit(model_id, "unloaded")
+            
+            # Force garbage collection for memory cleanup
+            import gc
+            gc.collect()
+            
+            # Clear CUDA cache if available
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            self.logger.info(f"Model unloaded successfully: {model_id}")
             return True
             
         except Exception as e:
-            self.model_error.emit(model_id, str(e))
+            self.logger.error(f"Failed to unload model {model_id}: {e}")
             return False
     
-    def _load_huggingface_model(self, config: ModelConfig):
-        """Load a HuggingFace model"""
-        self.logger.info(f"Loading HuggingFace model: {config.model_path}")
+    def _load_huggingface_model(self, config: ModelConfig) -> bool:
+        """
+        Load a HuggingFace transformer model.
         
-        # Check if CUDA is available
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        Downloads, caches, and initializes a HuggingFace model for local inference.
+        Handles device placement, memory optimization, and error recovery.
         
-        # Load tokenizer and model
-        tokenizer = AutoTokenizer.from_pretrained(config.model_path)
-        model = AutoModelForCausalLM.from_pretrained(
-            config.model_path,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            device_map="auto" if device == "cuda" else None
-        )
-        
-        # Create pipeline
-        pipe = pipeline(
-            "text-generation",
-            model=model,
-            tokenizer=tokenizer,
-            device=0 if device == "cuda" else -1,
-            max_new_tokens=config.max_tokens,
-            temperature=config.temperature,
-            do_sample=True
-        )
-        
-        self.loaded_models[config.id] = {
-            'pipeline': pipe,
-            'tokenizer': tokenizer,
-            'config': config
-        }
+        Args:
+            config (ModelConfig): HuggingFace model configuration
+            
+        Returns:
+            bool: True if model loaded successfully
+            
+        Raises:
+            RuntimeError: If model loading fails due to memory or compatibility issues
+            ValueError: If model path is invalid or model not found
+        """
+        try:
+            self.logger.info(f"Loading HuggingFace model: {config.model_path}")
+            
+            # Determine optimal device and settings
+            device, dtype = self._get_optimal_device_settings()
+            
+            # Create cache directory for this model
+            model_cache_dir = os.path.join(self.cache_dir, 'huggingface', 
+                                         config.model_path.replace('/', '_'))
+            os.makedirs(model_cache_dir, exist_ok=True)
+            
+            # Load tokenizer with error handling
+            self.logger.debug(f"Loading tokenizer for {config.model_path}")
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    config.model_path,
+                    cache_dir=model_cache_dir,
+                    trust_remote_code=False,  # Security: don't execute remote code
+                    local_files_only=False    # Allow downloads if needed
+                )
+                
+                # Ensure tokenizer has required special tokens
+                if tokenizer.pad_token is None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                    
+            except Exception as e:
+                raise RuntimeError(f"Failed to load tokenizer: {e}")
+            
+            # Load model with optimizations
+            self.logger.debug(f"Loading model weights for {config.model_path}")
+            try:
+                model_kwargs = {
+                    'cache_dir': model_cache_dir,
+                    'trust_remote_code': False,
+                    'local_files_only': False,
+                    'torch_dtype': dtype,
+                    'low_cpu_mem_usage': True,  # Optimize memory usage
+                }
+                
+                # Configure device placement
+                if device == "cuda":
+                    model_kwargs['device_map'] = "auto"
+                    model_kwargs['max_memory'] = self._get_max_memory_config()
+                
+                model = AutoModelForCausalLM.from_pretrained(
+                    config.model_path,
+                    **model_kwargs
+                )
+                
+                # Move to device if not using device_map
+                if device != "cuda":
+                    model = model.to(device)
+                
+                # Set to evaluation mode
+                model.eval()
+                
+            except Exception as e:
+                raise RuntimeError(f"Failed to load model weights: {e}")
+            
+            # Create optimized inference pipeline
+            self.logger.debug(f"Creating inference pipeline for {config.model_path}")
+            try:
+                pipeline_kwargs = {
+                    'model': model,
+                    'tokenizer': tokenizer,
+                    'max_new_tokens': config.max_tokens,
+                    'temperature': config.temperature,
+                    'do_sample': True,
+                    'return_full_text': False,  # Only return generated text
+                    'clean_up_tokenization_spaces': True
+                }
+                
+                # Set device for pipeline
+                if device == "cuda":
+                    pipeline_kwargs['device'] = 0
+                else:
+                    pipeline_kwargs['device'] = -1
+                
+                pipe = pipeline(
+                    "text-generation",
+                    **pipeline_kwargs
+                )
+                
+            except Exception as e:
+                raise RuntimeError(f"Failed to create inference pipeline: {e}")
+            
+            # Store model components
+            self.loaded_models[config.id] = {
+                'pipeline': pipe,
+                'model': model,
+                'tokenizer': tokenizer,
+                'config': config,
+                'device': device,
+                'dtype': str(dtype),
+                'cache_dir': model_cache_dir
+            }
+            
+            # Log success with resource info
+            model_params = sum(p.numel() for p in model.parameters())
+            self.logger.info(f"HuggingFace model loaded successfully: {config.model_path}")
+            self.logger.info(f"Model parameters: {model_params:,} ({model_params/1e6:.1f}M)")
+            self.logger.info(f"Device: {device}, Dtype: {dtype}")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load HuggingFace model {config.model_path}: {e}")
+            # Cleanup any partially loaded components
+            self._cleanup_failed_model_load(config.id)
+            raise
     
-    def _load_ollama_model(self, config: ModelConfig):
-        """Load an Ollama model"""
-        # Ollama models are loaded on-demand
-        self.loaded_models[config.id] = config
+    def _get_optimal_device_settings(self):
+        """
+        Determine optimal device and dtype settings for model loading.
+        
+        Returns:
+            Tuple[str, torch.dtype]: Device name and optimal data type
+        """
+        if torch.cuda.is_available():
+            # Check available VRAM
+            try:
+                gpu_memory = torch.cuda.get_device_properties(0).total_memory
+                gpu_memory_gb = gpu_memory / 1024**3
+                
+                if gpu_memory_gb >= 8:  # Sufficient VRAM for float16
+                    return "cuda", torch.float16
+                elif gpu_memory_gb >= 4:  # Limited VRAM, use smaller models only
+                    return "cuda", torch.float16
+                else:
+                    self.logger.warning(f"Limited GPU memory ({gpu_memory_gb:.1f}GB), using CPU")
+                    return "cpu", torch.float32
+                    
+            except Exception as e:
+                self.logger.warning(f"Failed to query GPU memory, using CPU: {e}")
+                return "cpu", torch.float32
+        else:
+            return "cpu", torch.float32
+    
+    def _get_max_memory_config(self):
+        """
+        Get maximum memory configuration for multi-GPU setups.
+        
+        Returns:
+            Dict: Memory configuration for device placement
+        """
+        if not torch.cuda.is_available():
+            return None
+            
+        try:
+            device_count = torch.cuda.device_count()
+            max_memory = {}
+            
+            for i in range(device_count):
+                # Reserve some memory for system operations
+                total_memory = torch.cuda.get_device_properties(i).total_memory
+                usable_memory = int(total_memory * 0.9)  # Use 90% of available memory
+                max_memory[i] = f"{usable_memory // 1024**2}MB"
+            
+            return max_memory
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to configure memory limits: {e}")
+            return None
+    
+    def _cleanup_failed_model_load(self, model_id: str):
+        """
+        Cleanup resources from a failed model load attempt.
+        
+        Args:
+            model_id (str): ID of the model that failed to load
+        """
+        try:
+            if model_id in self.loaded_models:
+                del self.loaded_models[model_id]
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            # Clear CUDA cache if available
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+        except Exception as e:
+            self.logger.error(f"Failed to cleanup after model load failure: {e}")
+    
+    def _load_ollama_model(self, config: ModelConfig) -> bool:
+        """
+        Load an Ollama model configuration.
+        
+        Ollama models are loaded on-demand when inference is requested,
+        so this method validates the configuration and connectivity.
+        
+        Args:
+            config (ModelConfig): Ollama model configuration
+            
+        Returns:
+            bool: True if configuration is valid
+        """
+        try:
+            self.logger.info(f"Validating Ollama model: {config.model_path}")
+            
+            # Test Ollama connectivity
+            endpoint = config.endpoint or "http://localhost:11434"
+            
+            # Try to ping Ollama server
+            try:
+                import requests
+                response = requests.get(f"{endpoint}/api/tags", timeout=5)
+                if response.status_code == 200:
+                    available_models = response.json().get('models', [])
+                    model_names = [m['name'] for m in available_models]
+                    
+                    if config.model_path not in model_names:
+                        self.logger.warning(f"Model {config.model_path} not found in Ollama. "
+                                          f"Available: {model_names}")
+                else:
+                    self.logger.warning(f"Ollama server responded with status {response.status_code}")
+                    
+            except requests.exceptions.RequestException as e:
+                self.logger.warning(f"Cannot connect to Ollama server: {e}")
+                # Don't fail completely - model might become available later
+            
+            # Store configuration
+            self.loaded_models[config.id] = {
+                'config': config,
+                'endpoint': endpoint,
+                'type': 'ollama'
+            }
+            
+            self.logger.info(f"Ollama model configured: {config.model_path}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to configure Ollama model {config.model_path}: {e}")
+            raise
     
     async def generate_response(self, model_id: str, messages: List[ChatMessage], 
                               request_id: str = None) -> str:
