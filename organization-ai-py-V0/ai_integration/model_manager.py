@@ -1,8 +1,31 @@
+"""
+AI Model Manager Module
+
+This module provides comprehensive management of AI models supporting multiple providers
+including OpenAI, Anthropic, Groq, HuggingFace, and Ollama. It handles model loading,
+inference execution, and real-time streaming responses.
+
+Key Features:
+- Multi-provider AI model support (API and local models)
+- Asynchronous inference with progress tracking
+- Secure API key management
+- Local model caching and optimization
+- Real-time streaming responses
+- Comprehensive error handling and logging
+
+Supported Providers:
+- OpenAI (GPT-3.5, GPT-4, etc.)
+- Anthropic (Claude 3 family)
+- Groq (Mixtral, Llama 2, etc.)
+- HuggingFace (Local transformer models)
+- Ollama (Local model serving)
+"""
+
 import asyncio
 import json
 import os
-from typing import Dict, List, Optional, AsyncGenerator
-from dataclasses import dataclass
+from typing import Dict, List, Optional, AsyncGenerator, Union, Callable
+from dataclasses import dataclass, field
 from enum import Enum
 import aiohttp
 import requests
@@ -11,15 +34,45 @@ import torch
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 import logging
 
+# Configure module-level logging
+logger = logging.getLogger(__name__)
+
 class ModelType(Enum):
-    API_OPENAI = "openai"
-    API_ANTHROPIC = "anthropic"
-    API_GROQ = "groq"
-    LOCAL_HUGGINGFACE = "huggingface"
-    LOCAL_OLLAMA = "ollama"
+    """
+    Enumeration of supported AI model types.
+    
+    This enum categorizes models by their deployment and access method,
+    enabling appropriate handling for each model type.
+    """
+    API_OPENAI = "openai"          # OpenAI API models (GPT family)
+    API_ANTHROPIC = "anthropic"    # Anthropic API models (Claude family)
+    API_GROQ = "groq"              # Groq API models (fast inference)
+    LOCAL_HUGGINGFACE = "huggingface"  # Local HuggingFace transformer models
+    LOCAL_OLLAMA = "ollama"        # Local Ollama served models
+
 
 @dataclass
 class ModelConfig:
+    """
+    Configuration class for AI models.
+    
+    Contains all necessary parameters for model initialization and operation,
+    supporting both API-based and locally hosted models.
+    
+    Attributes:
+        id (str): Unique identifier for the model
+        name (str): Human-readable model name
+        type (ModelType): Model deployment type
+        endpoint (str, optional): API endpoint URL for remote models
+        api_key (str, optional): Authentication key for API models
+        model_path (str, optional): Model path/identifier for loading
+        max_tokens (int): Maximum tokens to generate in response
+        temperature (float): Sampling temperature for response generation
+        context_length (int): Maximum context window size
+        description (str): Model description and capabilities
+        tags (List[str]): Tags for model categorization and filtering
+        capabilities (List[str]): List of model capabilities
+    """
     id: str
     name: str
     type: ModelType
@@ -29,51 +82,221 @@ class ModelConfig:
     max_tokens: int = 2048
     temperature: float = 0.7
     context_length: int = 4096
+    description: str = ""
+    tags: List[str] = field(default_factory=list)
+    capabilities: List[str] = field(default_factory=list)
+    
+    def __post_init__(self):
+        """Post-initialization validation and setup."""
+        # Validate required fields based on model type
+        if self.type in [ModelType.API_OPENAI, ModelType.API_ANTHROPIC, ModelType.API_GROQ]:
+            if not self.model_path:
+                raise ValueError(f"model_path required for {self.type.value} models")
+        elif self.type in [ModelType.LOCAL_HUGGINGFACE, ModelType.LOCAL_OLLAMA]:
+            if not self.model_path:
+                raise ValueError(f"model_path required for {self.type.value} models")
+                
+        # Set default capabilities based on model type
+        if not self.capabilities:
+            self.capabilities = self._get_default_capabilities()
+            
+    def _get_default_capabilities(self) -> List[str]:
+        """Get default capabilities based on model type."""
+        if self.type == ModelType.API_OPENAI:
+            return ["chat", "completion", "function_calling"]
+        elif self.type == ModelType.API_ANTHROPIC:
+            return ["chat", "completion", "long_context"]
+        elif self.type == ModelType.API_GROQ:
+            return ["chat", "completion", "fast_inference"]
+        elif self.type == ModelType.LOCAL_HUGGINGFACE:
+            return ["chat", "completion", "offline"]
+        elif self.type == ModelType.LOCAL_OLLAMA:
+            return ["chat", "completion", "offline", "local_hosting"]
+        return []
+
 
 @dataclass
 class ChatMessage:
-    role: str  # "system", "user", "assistant"
+    """
+    Represents a chat message in a conversation.
+    
+    Supports different message roles and includes metadata for tracking
+    and debugging conversation flow.
+    
+    Attributes:
+        role (str): Message role ("system", "user", "assistant", "function")
+        content (str): Message content/text
+        timestamp (str, optional): ISO timestamp of message creation
+        metadata (dict, optional): Additional message metadata
+    """
+    role: str  # "system", "user", "assistant", "function"
     content: str
     timestamp: Optional[str] = None
+    metadata: Optional[Dict] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Post-initialization validation."""
+        valid_roles = ["system", "user", "assistant", "function"]
+        if self.role not in valid_roles:
+            raise ValueError(f"Invalid role '{self.role}'. Must be one of: {valid_roles}")
+            
+        if not self.timestamp:
+            from datetime import datetime
+            self.timestamp = datetime.now().isoformat()
 
 class AIModelManager(QObject):
-    """Manages AI model connections and inference"""
+    """
+    Comprehensive AI model management system.
     
+    This class provides a unified interface for managing AI models across multiple
+    providers, handling everything from model loading and configuration to 
+    inference execution and streaming responses.
+    
+    Key Features:
+    - Multi-provider support (OpenAI, Anthropic, Groq, HuggingFace, Ollama)
+    - Asynchronous inference with real-time progress tracking
+    - Secure API key management and storage
+    - Local model caching and optimization
+    - Thread-safe operations for GUI applications
+    - Comprehensive error handling and recovery
+    
+    Signals:
+        model_loaded(str): Emitted when a model is successfully loaded
+        model_error(str, str): Emitted when model loading fails (model_id, error)
+        inference_complete(str, str): Emitted when inference completes (request_id, response)
+        inference_progress(str, str): Emitted during streaming (request_id, partial_response)
+        model_status_changed(str, str): Emitted when model status changes (model_id, status)
+    """
+    
+    # Define Qt signals for async communication
     model_loaded = pyqtSignal(str)  # model_id
     model_error = pyqtSignal(str, str)  # model_id, error_message
     inference_complete = pyqtSignal(str, str)  # request_id, response
     inference_progress = pyqtSignal(str, str)  # request_id, partial_response
+    model_status_changed = pyqtSignal(str, str)  # model_id, status
     
     def __init__(self):
+        """Initialize the AI model manager."""
         super().__init__()
-        self.models: Dict[str, ModelConfig] = {}
-        self.loaded_models: Dict[str, any] = {}
-        self.api_keys = self.load_api_keys()
-        self.setup_logging()
+        
+        # Core data structures
+        self.models: Dict[str, ModelConfig] = {}  # Available model configurations
+        self.loaded_models: Dict[str, any] = {}   # Currently loaded model instances
+        self.model_status: Dict[str, str] = {}    # Model loading/status tracking
+        
+        # Configuration and security
+        self.api_keys = self._load_api_keys()     # Secure API key storage
+        self.cache_dir = self._get_cache_directory()  # Local model cache location
+        
+        # Performance and monitoring
+        self.request_history: List[Dict] = []     # Request history for analytics
+        self.performance_metrics: Dict = {}       # Performance tracking
+        
+        # Initialize logging and setup
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self._setup_cache_directory()
+        self._initialize_torch_settings()
+        
+        self.logger.info("AI Model Manager initialized successfully")
+        
+    def _get_cache_directory(self) -> str:
+        """
+        Get or create the model cache directory.
+        
+        Returns:
+            str: Path to the model cache directory
+        """
+        cache_dir = os.path.join(os.path.expanduser('~'), '.organization_ai', 'models')
+        os.makedirs(cache_dir, exist_ok=True)
+        return cache_dir
+        
+    def _setup_cache_directory(self):
+        """Setup the model cache directory with proper structure."""
+        try:
+            # Create subdirectories for different model types
+            subdirs = ['huggingface', 'ollama', 'temp', 'logs']
+            for subdir in subdirs:
+                os.makedirs(os.path.join(self.cache_dir, subdir), exist_ok=True)
+            self.logger.debug(f"Cache directory setup completed: {self.cache_dir}")
+        except Exception as e:
+            self.logger.error(f"Failed to setup cache directory: {e}")
+            
+    def _initialize_torch_settings(self):
+        """Initialize PyTorch settings for optimal performance."""
+        try:
+            # Set multiprocessing start method for compatibility
+            if hasattr(torch.multiprocessing, 'set_start_method'):
+                try:
+                    torch.multiprocessing.set_start_method('spawn', force=True)
+                except RuntimeError:
+                    pass  # Already set
+                    
+            # Log available compute resources
+            if torch.cuda.is_available():
+                device_count = torch.cuda.device_count()
+                current_device = torch.cuda.current_device()
+                device_name = torch.cuda.get_device_name(current_device)
+                self.logger.info(f"CUDA available: {device_count} devices, current: {device_name}")
+            else:
+                self.logger.info("CUDA not available, using CPU for local models")
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize PyTorch settings: {e}")
         
     def setup_logging(self):
-        logging.basicConfig(level=logging.INFO)
-        self.logger = logging.getLogger(__name__)
+        """
+        DEPRECATED: Use module-level logger instead.
         
-    def load_api_keys(self) -> Dict[str, str]:
-        """Load API keys from environment or config file"""
+        This method is maintained for backward compatibility.
+        """
+        self.logger.warning("setup_logging() is deprecated, using module-level logger")
+        
+    def _load_api_keys(self) -> Dict[str, str]:
+        """
+        Load API keys from multiple sources.
+        
+        Attempts to load API keys from environment variables first,
+        then from local configuration file as fallback.
+        
+        Returns:
+            Dict[str, str]: Dictionary of provider -> API key mappings
+        """
         api_keys = {}
         
-        # Try environment variables first
-        api_keys['openai'] = os.getenv('OPENAI_API_KEY', '')
-        api_keys['anthropic'] = os.getenv('ANTHROPIC_API_KEY', '')
-        api_keys['groq'] = os.getenv('GROQ_API_KEY', '')
+        # Load from environment variables (preferred method)
+        env_keys = {
+            'openai': 'OPENAI_API_KEY',
+            'anthropic': 'ANTHROPIC_API_KEY', 
+            'groq': 'GROQ_API_KEY'
+        }
         
-        # Try loading from config file
+        for provider, env_var in env_keys.items():
+            key = os.getenv(env_var)
+            if key:
+                api_keys[provider] = key
+                self.logger.debug(f"Loaded {provider} API key from environment")
+        
+        # Load from configuration file as fallback
         config_path = os.path.join(os.path.expanduser('~'), '.organization_ai', 'config.json')
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as f:
                     config = json.load(f)
-                    api_keys.update(config.get('api_keys', {}))
+                    file_keys = config.get('api_keys', {})
+                    
+                    # Only use file keys if not already loaded from environment
+                    for provider, key in file_keys.items():
+                        if provider not in api_keys and key:
+                            api_keys[provider] = key
+                            self.logger.debug(f"Loaded {provider} API key from config file")
+                            
             except Exception as e:
                 self.logger.warning(f"Could not load config file: {e}")
-                
+        
+        # Log summary (without exposing actual keys)
+        loaded_providers = list(api_keys.keys())
+        self.logger.info(f"API keys loaded for providers: {loaded_providers}")
+        
         return api_keys
     
     def save_api_keys(self, keys: Dict[str, str]):
