@@ -179,6 +179,9 @@ class AIModelManager(QObject):
         """Initialize the AI model manager."""
         super().__init__()
         
+        # Initialize logging first
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        
         # Core data structures
         self.models: Dict[str, ModelConfig] = {}  # Available model configurations
         self.loaded_models: Dict[str, any] = {}   # Currently loaded model instances
@@ -192,8 +195,7 @@ class AIModelManager(QObject):
         self.request_history: List[Dict] = []     # Request history for analytics
         self.performance_metrics: Dict = {}       # Performance tracking
         
-        # Initialize logging and setup
-        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        # Initialize setup methods
         self._setup_cache_directory()
         self._initialize_torch_settings()
         
