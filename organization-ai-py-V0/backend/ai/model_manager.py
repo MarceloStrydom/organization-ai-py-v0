@@ -34,115 +34,11 @@ import torch
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 import logging
 
+# Import data models
+from core.models.data_models import ModelType, ModelConfig, ChatMessage
+
 # Configure module-level logging
 logger = logging.getLogger(__name__)
-
-class ModelType(Enum):
-    """
-    Enumeration of supported AI model types.
-    
-    This enum categorizes models by their deployment and access method,
-    enabling appropriate handling for each model type.
-    """
-    API_OPENAI = "openai"          # OpenAI API models (GPT family)
-    API_ANTHROPIC = "anthropic"    # Anthropic API models (Claude family)
-    API_GROQ = "groq"              # Groq API models (fast inference)
-    LOCAL_HUGGINGFACE = "huggingface"  # Local HuggingFace transformer models
-    LOCAL_OLLAMA = "ollama"        # Local Ollama served models
-
-
-@dataclass
-class ModelConfig:
-    """
-    Configuration class for AI models.
-    
-    Contains all necessary parameters for model initialization and operation,
-    supporting both API-based and locally hosted models.
-    
-    Attributes:
-        id (str): Unique identifier for the model
-        name (str): Human-readable model name
-        type (ModelType): Model deployment type
-        endpoint (str, optional): API endpoint URL for remote models
-        api_key (str, optional): Authentication key for API models
-        model_path (str, optional): Model path/identifier for loading
-        max_tokens (int): Maximum tokens to generate in response
-        temperature (float): Sampling temperature for response generation
-        context_length (int): Maximum context window size
-        description (str): Model description and capabilities
-        tags (List[str]): Tags for model categorization and filtering
-        capabilities (List[str]): List of model capabilities
-    """
-    id: str
-    name: str
-    type: ModelType
-    endpoint: Optional[str] = None
-    api_key: Optional[str] = None
-    model_path: Optional[str] = None
-    max_tokens: int = 2048
-    temperature: float = 0.7
-    context_length: int = 4096
-    description: str = ""
-    tags: List[str] = field(default_factory=list)
-    capabilities: List[str] = field(default_factory=list)
-    
-    def __post_init__(self):
-        """Post-initialization validation and setup."""
-        # Validate required fields based on model type
-        if self.type in [ModelType.API_OPENAI, ModelType.API_ANTHROPIC, ModelType.API_GROQ]:
-            if not self.model_path:
-                raise ValueError(f"model_path required for {self.type.value} models")
-        elif self.type in [ModelType.LOCAL_HUGGINGFACE, ModelType.LOCAL_OLLAMA]:
-            if not self.model_path:
-                raise ValueError(f"model_path required for {self.type.value} models")
-                
-        # Set default capabilities based on model type
-        if not self.capabilities:
-            self.capabilities = self._get_default_capabilities()
-            
-    def _get_default_capabilities(self) -> List[str]:
-        """Get default capabilities based on model type."""
-        if self.type == ModelType.API_OPENAI:
-            return ["chat", "completion", "function_calling"]
-        elif self.type == ModelType.API_ANTHROPIC:
-            return ["chat", "completion", "long_context"]
-        elif self.type == ModelType.API_GROQ:
-            return ["chat", "completion", "fast_inference"]
-        elif self.type == ModelType.LOCAL_HUGGINGFACE:
-            return ["chat", "completion", "offline"]
-        elif self.type == ModelType.LOCAL_OLLAMA:
-            return ["chat", "completion", "offline", "local_hosting"]
-        return []
-
-
-@dataclass
-class ChatMessage:
-    """
-    Represents a chat message in a conversation.
-    
-    Supports different message roles and includes metadata for tracking
-    and debugging conversation flow.
-    
-    Attributes:
-        role (str): Message role ("system", "user", "assistant", "function")
-        content (str): Message content/text
-        timestamp (str, optional): ISO timestamp of message creation
-        metadata (dict, optional): Additional message metadata
-    """
-    role: str  # "system", "user", "assistant", "function"
-    content: str
-    timestamp: Optional[str] = None
-    metadata: Optional[Dict] = field(default_factory=dict)
-    
-    def __post_init__(self):
-        """Post-initialization validation."""
-        valid_roles = ["system", "user", "assistant", "function"]
-        if self.role not in valid_roles:
-            raise ValueError(f"Invalid role '{self.role}'. Must be one of: {valid_roles}")
-            
-        if not self.timestamp:
-            from datetime import datetime
-            self.timestamp = datetime.now().isoformat()
 
 class AIModelManager(QObject):
     """

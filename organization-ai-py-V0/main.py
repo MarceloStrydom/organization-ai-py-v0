@@ -30,16 +30,16 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QSettings
 from PyQt6.QtGui import QAction, QIcon, QPixmap, QFont
 
 # Import AI integration modules
-from ai_integration.model_manager import AIModelManager, get_default_models
-from ai_integration.agent_executor import AgentExecutor
+from backend.ai.model_manager import AIModelManager, get_default_models
+from backend.ai.agent_executor import AgentExecutor
 
 # Import UI components
-from components.model_configuration import ModelConfigurationDialog
-from components.top_bar import TopBar
-from components.execution_console import ExecutionThread
+from frontend.components.model_configuration import ModelConfigurationDialog
+from frontend.components.top_bar import TopBar
+from frontend.components.execution_console import ExecutionThread
 
 # Import utilities
-from utils.theme import apply_dark_theme, get_color_scheme
+from frontend.ui.theme import apply_dark_theme, get_color_scheme
 
 # Configure application-wide logging
 logging.basicConfig(
