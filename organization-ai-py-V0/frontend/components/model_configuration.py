@@ -3,7 +3,8 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                             QFormLayout, QComboBox, QSpinBox, QTextEdit,
                             QMessageBox, QGroupBox, QCheckBox)
 from PyQt6.QtCore import Qt, pyqtSignal
-from ai_integration.model_manager import AIModelManager, ModelType, ModelConfig, get_default_models
+from backend.ai.model_manager import AIModelManager, get_default_models
+from core.models.data_models import ModelType, ModelConfig
 
 class APIKeyDialog(QDialog):
     """Dialog for configuring API keys"""

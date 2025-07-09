@@ -31,7 +31,8 @@ from typing import List, Dict, Optional, Any, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
-from .model_manager import AIModelManager, ChatMessage, ModelConfig
+from .model_manager import AIModelManager
+from core.models.data_models import ChatMessage, ModelConfig, ExecutionStep, WorkflowExecution, ExecutionStatus
 import logging
 
 # Configure module-level logging
