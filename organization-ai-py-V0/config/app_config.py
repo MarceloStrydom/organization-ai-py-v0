@@ -151,3 +151,23 @@ app_config = AppConfig()
 def get_config() -> AppConfig:
     """Get the global application configuration instance."""
     return app_config
+
+
+def load_config() -> Dict[str, Any]:
+    """Load configuration from the global config instance."""
+    return app_config._config
+
+
+def save_config(config: Optional[Dict[str, Any]] = None) -> bool:
+    """Save configuration using the global config instance."""
+    return app_config.save_config(config)
+
+
+def get_config_value(key_path: str, default: Any = None) -> Any:
+    """Get a configuration value using dot notation."""
+    return app_config.get(key_path, default)
+
+
+def set_config_value(key_path: str, value: Any) -> None:
+    """Set a configuration value using dot notation."""
+    app_config.set(key_path, value)

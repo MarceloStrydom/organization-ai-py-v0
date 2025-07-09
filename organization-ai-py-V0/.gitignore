@@ -72,11 +72,15 @@ ehthumbs.db
 Thumbs.db
 
 # Application specific
-organization_ai.log
+organization_ai.log*
 *.log
 .organization_ai/
 models/
 temp/
+data/models/
+data/cache/
+data/downloads/
+config/api_keys.json
 
 # PyQt UI files
 *.ui
